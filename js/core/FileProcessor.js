@@ -1,8 +1,8 @@
 class FileProcessor {
     constructor() {
-        this.chunkSize = 1000; // 每次处理的行数
-        this.maxFileSize = 100 * 1024 * 1024; // 100MB限制
-        this.supportedFormats = ['.csv', '.xlsx', '.xls'];
+        this.chunkSize = 1000;
+        this.maxFileSize = 100 * 1024 * 1024; // 100MB
+        this.supportedFormats = ['.csv', '.xlsx', '.xls', '.zip'];
     }
 
     // 处理上传的文件
@@ -43,6 +43,8 @@ class FileProcessor {
         let result;
         if (fileExt === '.csv') {
             result = await this.processCSVFile(file, options);
+        } else if (fileExt === '.zip') {
+            result = await this.processZipFile(file, options);
         } else {
             result = await this.processExcelFile(file, options);
         }
@@ -51,7 +53,8 @@ class FileProcessor {
             success: true,
             fileName: file.name,
             tables: result.tables,
-            totalRows: result.totalRows
+            totalRows: result.totalRows,
+            processedFiles: result.processedFiles || 1
         };
     }
 
@@ -169,6 +172,203 @@ class FileProcessor {
         });
     }
 
+    // 处理ZIP文件
+    async processZipFile(file, options) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            
+            reader.onload = async (e) => {
+                try {
+                    const arrayBuffer = e.target.result;
+                    
+                    // 检查JSZip库是否可用
+                    if (typeof JSZip === 'undefined') {
+                        throw new Error('JSZip库未加载，无法解压ZIP文件');
+                    }
+                    
+                    // 使用JSZip库解压
+                    const zip = new JSZip();
+                    const zipContent = await zip.loadAsync(arrayBuffer);
+                    
+                    const tables = [];
+                    let totalRows = 0;
+                    let processedFiles = 0;
+                    let failedFiles = 0;
+                    
+                    // 获取ZIP文件中的所有文件
+                    const filePromises = [];
+                    
+                    zipContent.forEach((relativePath, zipEntry) => {
+                        if (!zipEntry.dir) {
+                            filePromises.push(this.processZipEntry(zipEntry, relativePath));
+                        }
+                    });
+                    
+                    if (filePromises.length === 0) {
+                        reject(new Error('ZIP文件中没有找到任何文件'));
+                        return;
+                    }
+                    
+                    // 等待所有文件处理完成
+                    const results = await Promise.allSettled(filePromises);
+                    
+                    // 收集所有结果
+                    results.forEach(result => {
+                        if (result.status === 'fulfilled' && result.value) {
+                            tables.push(...result.value.tables);
+                            totalRows += result.value.totalRows;
+                            processedFiles++;
+                        } else {
+                            failedFiles++;
+                            console.error('处理ZIP内文件失败:', result.reason);
+                        }
+                    });
+                    
+                    if (tables.length === 0) {
+                        reject(new Error('ZIP文件中没有找到有效的数据文件'));
+                        return;
+                    }
+                    
+                    console.log(`ZIP处理完成: 成功 ${processedFiles} 个文件，失败 ${failedFiles} 个文件`);
+                    
+                    resolve({ 
+                        tables, 
+                        totalRows, 
+                        processedFiles,
+                        failedFiles 
+                    });
+                } catch (error) {
+                    reject(new Error(`处理ZIP文件失败: ${error.message}`));
+                }
+            };
+            
+            reader.onerror = reject;
+            reader.readAsArrayBuffer(file);
+        });
+    }
+
+    // 处理ZIP条目（单个文件）
+    async processZipEntry(zipEntry, relativePath) {
+        try {
+            // 获取文件扩展名
+            const fileExt = this.getFileExtension(zipEntry.name).toLowerCase();
+            
+            // 只处理支持的文件格式
+            if (!['.csv', '.xlsx', '.xls'].includes(fileExt)) {
+                console.log(`跳过不支持的文件格式: ${zipEntry.name} (${fileExt})`);
+                return null;
+            }
+            
+            console.log(`正在处理ZIP内文件: ${zipEntry.name}`);
+            
+            // 读取文件内容
+            const fileContent = await zipEntry.async('arraybuffer');
+            
+            if (fileExt === '.csv') {
+                // 处理CSV
+                const csvText = new TextDecoder('utf-8').decode(fileContent);
+                return await this.processCSVContent(csvText, zipEntry.name);
+            } else {
+                // 处理Excel
+                return await this.processExcelContent(fileContent, zipEntry.name);
+            }
+        } catch (error) {
+            console.error(`处理ZIP条目 ${zipEntry.name} 失败:`, error);
+            throw error;
+        }
+    }
+
+    // 处理Excel内容（从Buffer）
+    async processExcelContent(arrayBuffer, fileName) {
+        try {
+            const workbook = XLSX.read(arrayBuffer, { 
+                type: 'array',
+                cellDates: true,
+                cellNF: false,
+                cellText: false
+            });
+            
+            const tables = [];
+            let totalRows = 0;
+            
+            workbook.SheetNames.forEach((sheetName, index) => {
+                const worksheet = workbook.Sheets[sheetName];
+                const jsonData = XLSX.utils.sheet_to_json(worksheet, {
+                    defval: '',
+                    raw: false
+                });
+                
+                if (jsonData.length > 0) {
+                    const columns = Object.keys(jsonData[0]);
+                    
+                    tables.push({
+                        name: `${fileName.replace(/\.[^/.]+$/, "")} - ${sheetName}`,
+                        data: jsonData,
+                        columns: columns,
+                        sheetName: sheetName,
+                        rowCount: jsonData.length,
+                        columnCount: columns.length,
+                        sourceFile: fileName,
+                        fromZip: true
+                    });
+                    
+                    totalRows += jsonData.length;
+                }
+            });
+            
+            if (tables.length === 0) {
+                throw new Error('Excel文件中没有有效数据');
+            }
+            
+            return { tables, totalRows };
+        } catch (error) {
+            console.error(`处理Excel文件 ${fileName} 失败:`, error);
+            throw error;
+        }
+    }
+
+    // 处理CSV内容（从文本）
+    async processCSVContent(csvText, fileName) {
+        try {
+            const lines = csvText.split('\n').filter(line => line.trim());
+            
+            if (lines.length < 2) {
+                throw new Error('CSV文件内容为空或只有标题行');
+            }
+            
+            const headers = this.parseCSVLine(lines[0]);
+            const data = [];
+            
+            for (let i = 1; i < lines.length; i++) {
+                if (lines[i].trim()) {
+                    const values = this.parseCSVLine(lines[i]);
+                    const row = {};
+                    
+                    headers.forEach((header, index) => {
+                        row[header] = values[index] !== undefined ? values[index].trim() : '';
+                    });
+                    
+                    data.push(row);
+                }
+            }
+            
+            const tables = [{
+                name: fileName.replace(/\.[^/.]+$/, ""),
+                data: data,
+                columns: headers,
+                rowCount: data.length,
+                columnCount: headers.length,
+                sourceFile: fileName,
+                fromZip: true
+            }];
+            
+            return { tables, totalRows: data.length };
+        } catch (error) {
+            console.error(`处理CSV文件 ${fileName} 失败:`, error);
+            throw error;
+        }
+    }
+
     // 解析CSV行，处理引号和逗号
     parseCSVLine(line) {
         const result = [];
@@ -200,7 +400,8 @@ class FileProcessor {
 
     // 获取文件扩展名
     getFileExtension(filename) {
-        return filename.slice((filename.lastIndexOf(".") - 1 >>> 0) + 2);
+        const lastDot = filename.lastIndexOf('.');
+        return lastDot === -1 ? '' : filename.slice(lastDot);
     }
 
     // 批量处理文件（分块）
