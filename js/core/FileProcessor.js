@@ -1,542 +1,318 @@
-// 流式文件处理器
-class OptimizedFileProcessor {
+class FileProcessor {
     constructor() {
-        this.zipProcessor = new RobustZipProcessor();
-        this.excelWorker = null;
-        this.activeWorkers = new Set();
-        console.log('优化文件处理器初始化');
+        this.chunkSize = 1000; // 每次处理的行数
+        this.maxFileSize = 100 * 1024 * 1024; // 100MB限制
+        this.supportedFormats = ['.csv', '.xlsx', '.xls'];
     }
-    
-    async processFile(file, options = {}) {
-        const fileExt = file.name.toLowerCase().split('.').pop();
-        console.log('处理文件:', file.name, '大小:', (file.size / 1024 / 1024).toFixed(2), 'MB');
+
+    // 处理上传的文件
+    async processFiles(files, options = {}) {
+        const results = [];
         
-        try {
-            if (fileExt === 'zip') {
-                return await this.zipProcessor.processZipFile(file);
-            } else if (fileExt === 'xlsx' || fileExt === 'xls') {
-                return await this.processExcelFileWithWorker(file, options);
-            } else if (fileExt === 'csv') {
-                return await this.processCSVFile(file, options);
-            } else {
-                throw new Error('不支持的文件格式: ' + fileExt);
+        for (let file of files) {
+            try {
+                const result = await this.processSingleFile(file, options);
+                results.push(result);
+            } catch (error) {
+                console.error(`处理文件 ${file.name} 失败:`, error);
+                results.push({
+                    success: false,
+                    fileName: file.name,
+                    error: error.message
+                });
             }
-        } catch (error) {
-            console.error('处理文件失败:', error);
-            throw error;
-        }
-    }
-    
-    async processExcelFileWithWorker(file, options = {}) {
-        return new Promise((resolve, reject) => {
-            // 创建Web Worker
-            const worker = new Worker('./js/workers/excel-worker.js');
-            this.activeWorkers.add(worker);
-            
-            const chunkSize = options.chunkSize || 1000;
-            let allData = [];
-            let processedChunks = 0;
-            let totalChunks = 0;
-            let startTime = Date.now();
-            
-            worker.onmessage = (e) => {
-                switch (e.data.type) {
-                    case 'chunk':
-                        const chunkData = e.data.data;
-                        processedChunks++;
-                        
-                        // 流式处理：立即处理并释放内存
-                        allData = this.mergeDataStream(allData, chunkData);
-                        
-                        // 更新进度
-                        if (options.onProgress) {
-                            const progress = Math.round((processedChunks / totalChunks) * 100);
-                            options.onProgress({
-                                progress,
-                                chunk: processedChunks,
-                                totalChunks,
-                                rowsProcessed: allData.length
-                            });
-                        }
-                        break;
-                        
-                    case 'complete':
-                        // 处理完成
-                        worker.terminate();
-                        this.activeWorkers.delete(worker);
-                        
-                        const processingTime = Date.now() - startTime;
-                        console.log(`流式处理完成: ${allData.length}行, 耗时: ${processingTime}ms`);
-                        
-                        resolve({
-                            name: file.name,
-                            data: allData,
-                            columns: allData.length > 0 ? Object.keys(allData[0]) : [],
-                            rowCount: allData.length,
-                            processingTime,
-                            chunks: processedChunks
-                        });
-                        break;
-                        
-                    case 'error':
-                        worker.terminate();
-                        this.activeWorkers.delete(worker);
-                        reject(new Error('Worker处理错误: ' + e.data.error));
-                        break;
-                }
-            };
-            
-            worker.onerror = (error) => {
-                worker.terminate();
-                this.activeWorkers.delete(worker);
-                reject(new Error('Worker错误: ' + error.message));
-            };
-            
-            // 发送文件给Worker
-            worker.postMessage({
-                file: file,
-                chunkSize: chunkSize,
-                useStreaming: options.useStreaming !== false
-            });
-            
-            // 估计总块数
-            totalChunks = Math.ceil(file.size / (chunkSize * 100)); // 粗略估计
-        });
-    }
-    
-    mergeDataStream(existingData, newChunk) {
-        // 流式合并数据
-        if (!existingData || existingData.length === 0) {
-            return newChunk;
         }
         
-        // 简单合并
-        return [...existingData, ...newChunk];
+        return results;
     }
-    
-    async processCSVFile(file, options = {}) {
+
+    // 处理单个文件
+    async processSingleFile(file, options = {}) {
+        // 验证文件大小
+        if (file.size > this.maxFileSize) {
+            throw new Error(`文件大小超过限制 (${(file.size / 1024 / 1024).toFixed(1)}MB > 100MB)`);
+        }
+
+        // 验证文件格式
+        const fileExt = this.getFileExtension(file.name).toLowerCase();
+        if (!this.supportedFormats.includes(fileExt)) {
+            throw new Error(`不支持的文件格式: ${fileExt}，支持: ${this.supportedFormats.join(', ')}`);
+        }
+
+        // 根据文件类型处理
+        let result;
+        if (fileExt === '.csv') {
+            result = await this.processCSVFile(file, options);
+        } else {
+            result = await this.processExcelFile(file, options);
+        }
+
+        return {
+            success: true,
+            fileName: file.name,
+            tables: result.tables,
+            totalRows: result.totalRows
+        };
+    }
+
+    // 处理Excel文件
+    async processExcelFile(file, options) {
         return new Promise((resolve, reject) => {
             const reader = new FileReader();
-            const chunkSize = options.chunkSize || 5000;
-            let allLines = [];
             
             reader.onload = (e) => {
                 try {
-                    const text = e.target.result;
-                    const lines = text.split(/\r\n|\n|\r/);
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, { 
+                        type: 'array',
+                        cellDates: true,
+                        cellNF: false,
+                        cellText: false
+                    });
                     
-                    // 流式处理：分批处理
-                    for (let i = 0; i < lines.length; i += chunkSize) {
-                        const chunkLines = lines.slice(i, i + chunkSize);
-                        const chunkData = this.parseCSVChunk(chunkLines, i === 0);
-                        allLines = [...allLines, ...chunkData];
+                    const tables = [];
+                    let totalRows = 0;
+                    
+                    // 处理每个工作表
+                    workbook.SheetNames.forEach((sheetName, index) => {
+                        const worksheet = workbook.Sheets[sheetName];
                         
-                        // 更新进度
-                        if (options.onProgress) {
-                            const progress = Math.round((i + chunkLines.length) / lines.length * 100);
-                            options.onProgress({
-                                progress,
-                                rowsProcessed: allLines.length
+                        // 转换为JSON
+                        const jsonData = XLSX.utils.sheet_to_json(worksheet, {
+                            defval: '', // 空单元格的默认值
+                            raw: false  // 使用格式化后的值
+                        });
+                        
+                        if (jsonData.length > 0) {
+                            // 获取列名
+                            const columns = Object.keys(jsonData[0]);
+                            
+                            tables.push({
+                                name: `${file.name.replace(/\.[^/.]+$/, "")} - ${sheetName}`,
+                                data: jsonData,
+                                columns: columns,
+                                sheetName: sheetName,
+                                rowCount: jsonData.length,
+                                columnCount: columns.length
                             });
+                            
+                            totalRows += jsonData.length;
                         }
+                    });
+                    
+                    if (tables.length === 0) {
+                        reject(new Error('Excel文件中没有有效数据'));
+                        return;
                     }
                     
-                    resolve({
-                        name: file.name,
-                        data: allLines,
-                        columns: allLines.length > 0 ? Object.keys(allLines[0]) : [],
-                        rowCount: allLines.length
-                    });
+                    resolve({ tables, totalRows });
                 } catch (error) {
-                    reject(new Error('CSV文件解析失败: ' + error.message));
+                    reject(error);
                 }
             };
             
-            reader.onerror = () => reject(new Error('文件读取失败'));
+            reader.onerror = reject;
+            reader.readAsArrayBuffer(file);
+        });
+    }
+
+    // 处理CSV文件
+    async processCSVFile(file, options) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            
+            reader.onload = (e) => {
+                try {
+                    const csvText = e.target.result;
+                    const lines = csvText.split('\n').filter(line => line.trim());
+                    
+                    if (lines.length < 2) {
+                        reject(new Error('CSV文件内容为空或只有标题行'));
+                        return;
+                    }
+                    
+                    // 解析CSV
+                    const headers = this.parseCSVLine(lines[0]);
+                    const data = [];
+                    
+                    // 从第二行开始解析数据
+                    for (let i = 1; i < lines.length; i++) {
+                        if (lines[i].trim()) {
+                            const values = this.parseCSVLine(lines[i]);
+                            const row = {};
+                            
+                            // 确保列数和标题一致
+                            headers.forEach((header, index) => {
+                                row[header] = values[index] !== undefined ? values[index].trim() : '';
+                            });
+                            
+                            data.push(row);
+                        }
+                    }
+                    
+                    const tables = [{
+                        name: file.name.replace(/\.[^/.]+$/, ""),
+                        data: data,
+                        columns: headers,
+                        rowCount: data.length,
+                        columnCount: headers.length
+                    }];
+                    
+                    resolve({ tables, totalRows: data.length });
+                } catch (error) {
+                    reject(error);
+                }
+            };
+            
+            reader.onerror = reject;
             reader.readAsText(file, 'UTF-8');
         });
     }
-    
-    parseCSVChunk(lines, isFirstChunk) {
-        if (lines.length === 0) return [];
+
+    // 解析CSV行，处理引号和逗号
+    parseCSVLine(line) {
+        const result = [];
+        let current = '';
+        let inQuotes = false;
         
-        let headers = [];
-        let data = [];
-        
-        // 检测分隔符
-        const firstLine = lines[0];
-        let delimiter = ',';
-        const delimiterTests = [
-            { char: ',', count: (firstLine.match(/,/g) || []).length },
-            { char: '\t', count: (firstLine.match(/\t/g) || []).length },
-            { char: ';', count: (firstLine.match(/;/g) || []).length },
-            { char: '|', count: (firstLine.match(/\|/g) || []).length }
-        ];
-        
-        delimiterTests.sort((a, b) => b.count - a.count);
-        if (delimiterTests[0].count > 0) {
-            delimiter = delimiterTests[0].char;
-        }
-        
-        // 解析函数
-        const parseCSVLine = (line) => {
-            const result = [];
-            let current = '';
-            let inQuotes = false;
-            let quoteChar = '';
+        for (let i = 0; i < line.length; i++) {
+            const char = line[i];
             
-            for (let i = 0; i < line.length; i++) {
-                const char = line[i];
-                const nextChar = line[i + 1];
-                
-                if ((char === '"' || char === "'") && !inQuotes) {
-                    inQuotes = true;
-                    quoteChar = char;
-                } else if (char === quoteChar && inQuotes) {
-                    if (nextChar === quoteChar) {
-                        current += char;
-                        i++;
-                    } else {
-                        inQuotes = false;
-                    }
-                } else if (char === delimiter && !inQuotes) {
-                    result.push(current);
-                    current = '';
+            if (char === '"') {
+                // 检查是否是转义的引号
+                if (inQuotes && line[i + 1] === '"') {
+                    current += '"';
+                    i++; // 跳过下一个引号
                 } else {
-                    current += char;
+                    inQuotes = !inQuotes;
                 }
+            } else if (char === ',' && !inQuotes) {
+                result.push(current);
+                current = '';
+            } else {
+                current += char;
             }
-            
-            result.push(current);
-            return result.map(v => v.trim());
-        };
-        
-        // 如果是第一块，获取表头
-        if (isFirstChunk && lines.length > 0) {
-            headers = parseCSVLine(lines[0]).map(h => h.replace(/^["']|["']$/g, ''));
-            lines = lines.slice(1); // 移除表头行
         }
         
-        // 解析数据行
-        lines.forEach(line => {
-            if (line.trim() === '') return;
-            
-            const values = parseCSVLine(line);
-            const row = {};
-            
-            headers.forEach((header, index) => {
-                let value = values[index] || '';
-                value = value.replace(/^["']|["']$/g, '');
+        result.push(current);
+        return result.map(cell => cell.trim());
+    }
+
+    // 获取文件扩展名
+    getFileExtension(filename) {
+        return filename.slice((filename.lastIndexOf(".") - 1 >>> 0) + 2);
+    }
+
+    // 批量处理文件（分块）
+    async processFilesInChunks(files, progressCallback) {
+        const results = [];
+        let processedFiles = 0;
+        
+        for (let file of files) {
+            try {
+                progressCallback?.({
+                    type: 'file_start',
+                    fileName: file.name,
+                    current: processedFiles + 1,
+                    total: files.length
+                });
                 
-                // 尝试转换为数字
-                if (value !== '' && !isNaN(value) && value.trim() !== '') {
-                    const num = Number(value);
-                    if (!isNaN(num) && isFinite(num)) {
-                        value = num % 1 === 0 ? parseInt(value) : num;
+                const result = await this.processSingleFile(file);
+                results.push(result);
+                
+                processedFiles++;
+                progressCallback?.({
+                    type: 'file_complete',
+                    fileName: file.name,
+                    current: processedFiles,
+                    total: files.length
+                });
+            } catch (error) {
+                console.error(`处理文件 ${file.name} 失败:`, error);
+                results.push({
+                    success: false,
+                    fileName: file.name,
+                    error: error.message
+                });
+            }
+        }
+        
+        return results;
+    }
+
+    // 验证文件数据
+    validateData(data, options = {}) {
+        const issues = [];
+        
+        // 检查是否有数据
+        if (!data || data.length === 0) {
+            issues.push({ type: 'empty', message: '数据为空' });
+            return { valid: false, issues };
+        }
+        
+        // 检查列名
+        const firstRow = data[0];
+        const columns = Object.keys(firstRow);
+        
+        if (columns.length === 0) {
+            issues.push({ type: 'no_columns', message: '没有检测到列名' });
+        }
+        
+        // 检查空值
+        if (options.checkEmptyValues) {
+            const emptyValues = [];
+            data.forEach((row, rowIndex) => {
+                columns.forEach(col => {
+                    if (row[col] === null || row[col] === undefined || row[col] === '') {
+                        emptyValues.push({ row: rowIndex + 1, column: col });
                     }
-                }
-                
-                row[header || `列${index + 1}`] = value;
+                });
             });
             
-            // 检查行是否有有效数据
-            if (Object.values(row).some(val => {
-                if (typeof val === 'number') return true;
-                if (typeof val === 'string') return val.trim() !== '';
-                return val !== null && val !== undefined;
-            })) {
-                data.push(row);
+            if (emptyValues.length > 0) {
+                issues.push({
+                    type: 'empty_values',
+                    message: `发现 ${emptyValues.length} 个空值`,
+                    details: emptyValues.slice(0, 10) // 只显示前10个
+                });
             }
-        });
+        }
         
-        return data;
-    }
-    
-    // 终止所有Worker
-    terminateAllWorkers() {
-        this.activeWorkers.forEach(worker => {
-            worker.terminate();
-        });
-        this.activeWorkers.clear();
+        // 检查重复行
+        if (options.checkDuplicates) {
+            const uniqueRows = new Set();
+            const duplicates = [];
+            
+            data.forEach((row, index) => {
+                const rowString = JSON.stringify(row);
+                if (uniqueRows.has(rowString)) {
+                    duplicates.push(index + 1);
+                } else {
+                    uniqueRows.add(rowString);
+                }
+            });
+            
+            if (duplicates.length > 0) {
+                issues.push({
+                    type: 'duplicates',
+                    message: `发现 ${duplicates.length} 行重复数据`,
+                    details: duplicates.slice(0, 10)
+                });
+            }
+        }
+        
+        return {
+            valid: issues.length === 0,
+            issues,
+            stats: {
+                totalRows: data.length,
+                totalColumns: columns.length,
+                columns: columns
+            }
+        };
     }
 }
 
-// 强大的ZIP文件处理器
-class RobustZipProcessor {
-    constructor() {
-        console.log('强大的ZIP文件处理器初始化');
-    }
-    
-    async processZipFile(file) {
-        console.log('开始处理ZIP文件:', file.name);
-        
-        try {
-            if (typeof JSZip === 'undefined') {
-                throw new Error('JSZip库未加载，请刷新页面重试');
-            }
-            
-            const zip = await JSZip.loadAsync(file);
-            const processedFiles = [];
-            const fileList = [];
-            
-            // 收集所有文件
-            for (const [filename, zipEntry] of Object.entries(zip.files)) {
-                if (zipEntry.dir) continue;
-                fileList.push({ filename, zipEntry });
-            }
-            
-            console.log('ZIP中包含文件数量:', fileList.length);
-            
-            if (fileList.length === 0) {
-                throw new Error('ZIP文件中没有找到任何文件');
-            }
-            
-            // 流式处理每个文件
-            for (const { filename, zipEntry } of fileList) {
-                try {
-                    const fileData = await this.processZipEntry(zipEntry, filename, file.name);
-                    
-                    if (fileData && fileData.rowCount > 0) {
-                        processedFiles.push(fileData);
-                    }
-                } catch (error) {
-                    console.error(`处理ZIP中的文件失败 ${filename}:`, error);
-                }
-            }
-            
-            if (processedFiles.length === 0) {
-                throw new Error('ZIP文件中没有找到有效的数据文件');
-            }
-            
-            return {
-                name: file.name,
-                isZip: true,
-                files: processedFiles,
-                fileCount: processedFiles.length
-            };
-            
-        } catch (error) {
-            console.error('处理ZIP文件失败:', error);
-            throw new Error('ZIP文件处理失败: ' + error.message);
-        }
-    }
-    
-    async processZipEntry(zipEntry, filename, zipFileName) {
-        try {
-            const ext = filename.toLowerCase().split('.').pop();
-            
-            if (ext === 'xlsx' || ext === 'xls') {
-                const arrayBuffer = await zipEntry.async('arraybuffer');
-                return await this.processExcelData(arrayBuffer, filename, zipFileName);
-            } else if (ext === 'csv' || ext === 'txt') {
-                const text = await this.readZipEntryWithEncoding(zipEntry);
-                return await this.processCSVData(text, filename, zipFileName);
-            }
-            
-            return null;
-        } catch (error) {
-            console.error(`处理ZIP条目失败 ${filename}:`, error);
-            return null;
-        }
-    }
-    
-    async readZipEntryWithEncoding(zipEntry) {
-        const encodings = ['utf-8', 'gbk', 'gb2312', 'big5', 'latin1'];
-        
-        for (const encoding of encodings) {
-            try {
-                const uint8Array = await zipEntry.async('uint8array');
-                const decoder = new TextDecoder(encoding);
-                return decoder.decode(uint8Array);
-            } catch (e) {
-                continue;
-            }
-        }
-        
-        return await zipEntry.async('string');
-    }
-    
-    async processExcelData(arrayBuffer, filename, zipFileName) {
-        try {
-            const data = new Uint8Array(arrayBuffer);
-            const workbook = XLSX.read(data, { 
-                type: 'array',
-                cellDates: true,
-                cellNF: false,
-                cellText: true
-            });
-            
-            const allData = [];
-            
-            workbook.SheetNames.forEach(sheetName => {
-                try {
-                    const worksheet = workbook.Sheets[sheetName];
-                    let jsonData = XLSX.utils.sheet_to_json(worksheet, {
-                        defval: '',
-                        raw: false,
-                        dateNF: 'yyyy/mm/dd',
-                        blankrows: true
-                    });
-                    
-                    // 跳过前3行
-                    if (jsonData.length > 3) {
-                        jsonData = jsonData.filter((row, index) => index >= 3);
-                    }
-                    
-                    // 清理数据
-                    jsonData = jsonData.filter(row => {
-                        const values = Object.values(row);
-                        return values.some(val => 
-                            val !== null && val !== undefined && val !== '' && 
-                            !(typeof val === 'string' && val.trim() === '')
-                        );
-                    });
-                    
-                    if (jsonData.length > 0) {
-                        allData.push(...jsonData);
-                    }
-                } catch (sheetError) {
-                    console.error(`处理工作表 ${sheetName} 失败:`, sheetError);
-                }
-            });
-            
-            if (allData.length === 0) {
-                return null;
-            }
-            
-            // 智能命名
-            const baseName = this.extractBaseName(zipFileName);
-            const displayName = `${baseName}账单`;
-            
-            return {
-                name: displayName,
-                data: allData,
-                columns: allData.length > 0 ? Object.keys(allData[0]) : [],
-                rowCount: allData.length,
-                fromZip: true,
-                originalFileName: filename,
-                zipFileName: zipFileName,
-                fileType: 'excel'
-            };
-        } catch (error) {
-            console.error('处理Excel数据失败:', error);
-            throw error;
-        }
-    }
-    
-    async processCSVData(text, filename, zipFileName) {
-        try {
-            const lines = text.split(/\r\n|\n|\r/).filter(line => line.trim() !== '');
-            
-            if (lines.length < 2) {
-                return null;
-            }
-            
-            // 检测分隔符
-            const firstLine = lines[0];
-            let delimiter = ',';
-            const delimiterTests = [
-                { char: ',', count: (firstLine.match(/,/g) || []).length },
-                { char: '\t', count: (firstLine.match(/\t/g) || []).length },
-                { char: ';', count: (firstLine.match(/;/g) || []).length }
-            ];
-            
-            delimiterTests.sort((a, b) => b.count - a.count);
-            if (delimiterTests[0].count > 0) {
-                delimiter = delimiterTests[0].char;
-            }
-            
-            // 解析函数
-            const parseCSVLine = (line) => {
-                const result = [];
-                let current = '';
-                let inQuotes = false;
-                let quoteChar = '';
-                
-                for (let i = 0; i < line.length; i++) {
-                    const char = line[i];
-                    const nextChar = line[i + 1];
-                    
-                    if ((char === '"' || char === "'") && !inQuotes) {
-                        inQuotes = true;
-                        quoteChar = char;
-                    } else if (char === quoteChar && inQuotes) {
-                        if (nextChar === quoteChar) {
-                            current += char;
-                            i++;
-                        } else {
-                            inQuotes = false;
-                        }
-                    } else if (char === delimiter && !inQuotes) {
-                        result.push(current);
-                        current = '';
-                    } else {
-                        current += char;
-                    }
-                }
-                
-                result.push(current);
-                return result.map(v => v.trim());
-            };
-            
-            const headers = parseCSVLine(lines[0]).map(h => h.replace(/^["']|["']$/g, ''));
-            const data = [];
-            const startLine = Math.min(3, lines.length - 1);
-            
-            for (let i = startLine; i < lines.length; i++) {
-                const values = parseCSVLine(lines[i]);
-                const row = {};
-                
-                headers.forEach((header, index) => {
-                    let value = values[index] || '';
-                    value = value.replace(/^["']|["']$/g, '');
-                    
-                    if (value !== '' && !isNaN(value) && value.trim() !== '') {
-                        const num = Number(value);
-                        if (!isNaN(num) && isFinite(num)) {
-                            value = num % 1 === 0 ? parseInt(value) : num;
-                        }
-                    }
-                    
-                    row[header || `列${index + 1}`] = value;
-                });
-                
-                if (Object.values(row).some(val => {
-                    if (typeof val === 'number') return true;
-                    if (typeof val === 'string') return val.trim() !== '';
-                    return val !== null && val !== undefined;
-                })) {
-                    data.push(row);
-                }
-            }
-            
-            if (data.length === 0) {
-                return null;
-            }
-            
-            const baseName = this.extractBaseName(zipFileName);
-            const displayName = `${baseName}账单`;
-            
-            return {
-                name: displayName,
-                data: data,
-                columns: headers,
-                rowCount: data.length,
-                fromZip: true,
-                originalFileName: filename,
-                zipFileName: zipFileName,
-                fileType: 'csv'
-            };
-        } catch (error) {
-            console.error('处理CSV数据失败:', error);
-            throw error;
-        }
-    }
-    
-    extractBaseName(fileName) {
-        let baseName = fileName.replace(/^.*[\\\/]/, '');
-        baseName = baseName.replace(/\.[^/.]+$/, '');
-        baseName = baseName.replace(/[<>:"/\\|?*]/g, '');
-        return baseName.trim();
-    }
-}
+// 导出实例
+const fileProcessor = new FileProcessor();
+window.fileProcessor = fileProcessor;
