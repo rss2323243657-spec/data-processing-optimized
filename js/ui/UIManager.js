@@ -1,536 +1,696 @@
-// 优化的UI管理器
-class OptimizedUIManager {
+class UIManager {
     constructor() {
-        this.storage = new OptimizedDataStorage();
-        this.fileProcessor = new OptimizedFileProcessor();
-        this.dataProcessor = new OptimizedDataProcessor(this.storage);
-        
-        // 字段映射分页相关
-        this.fieldMappingPageSize = 100;
-        this.fieldMappingCurrentPage = 1;
-        this.fieldMappingTotalPages = 1;
-        this.filteredFieldCombinations = [];
-        this.allFieldCombinations = [];
-        
-        // 虚拟滚动实例
-        this.virtualScroll = null;
-        this.blankRowVirtualScroll = null;
-        
-        // 性能监控
-        this.performance = {
-            startTime: null,
-            processedRows: 0,
-            lastUpdate: Date.now()
-        };
-        
-        // 处理状态
-        this.isProcessing = false;
-        this.currentFilteredData = null;
-        this.currentFieldMappings = {};
-        this.currentFinalSummary = null;
-        
-        this.init();
+        this.currentPanel = 'upload';
+        this.isInitialized = false;
+        this.eventListeners = new Map();
     }
-    
+
+    // 初始化UI
     init() {
-        console.log('优化UI管理器初始化');
+        if (this.isInitialized) return;
+        
         this.bindEvents();
-        this.updateUI();
-        this.showStatus('优化版数据核算系统已就绪', 'success');
+        this.updateAllPanels();
+        this.isInitialized = true;
         
-        // 显示优化特性
-        setTimeout(() => {
-            this.showStatus('⚡ 优化特性：流式处理 + 虚拟滚动 + 智能索引', 'info');
-        }, 1000);
+        console.log('UI管理器初始化完成');
     }
-    
+
+    // 绑定事件
     bindEvents() {
-        // 绑定文件上传事件
-        const fileInput = document.getElementById('fileInput');
-        const dropArea = document.getElementById('uploadDropArea');
-        
-        if (fileInput) {
-            fileInput.addEventListener('change', (e) => {
-                this.handleFileUpload(e.target.files);
-            });
-        }
-        
-        // 拖放功能
-        if (dropArea) {
-            dropArea.addEventListener('dragover', (e) => {
-                e.preventDefault();
-                dropArea.style.borderColor = '#27ae60';
-                dropArea.style.background = 'rgba(39, 174, 96, 0.1)';
-            });
-            
-            dropArea.addEventListener('dragleave', () => {
-                dropArea.style.borderColor = '#3498db';
-                dropArea.style.background = 'rgba(52, 152, 219, 0.05)';
-            });
-            
-            dropArea.addEventListener('drop', (e) => {
-                e.preventDefault();
-                dropArea.style.borderColor = '#3498db';
-                dropArea.style.background = 'rgba(52, 152, 219, 0.05)';
-                
-                if (e.dataTransfer.files.length > 0) {
-                    this.handleFileUpload(e.dataTransfer.files);
+        // 导航点击事件
+        document.querySelectorAll('.nav-item').forEach(item => {
+            item.addEventListener('click', (e) => {
+                const onclick = item.getAttribute('onclick');
+                if (onclick && onclick.includes("showPanel('")) {
+                    const panelId = onclick.match(/showPanel\('([^']+)'/)[1];
+                    this.showPanel(panelId);
                 }
             });
-        }
-        
-        // 其他事件绑定...
-        this.setupPerformanceMonitoring();
-    }
-    
-    setupPerformanceMonitoring() {
-        // 定期更新性能指标
-        setInterval(() => {
-            this.updatePerformanceMetrics();
-        }, 3000);
-    }
-    
-    updatePerformanceMetrics() {
-        // 更新内存使用
-        if (performance.memory) {
-            const memory = performance.memory;
-            const usedMB = Math.round(memory.usedJSHeapSize / 1024 / 1024);
-            const totalMB = Math.round(memory.totalJSHeapSize / 1024 / 1024);
-            const percent = Math.round((usedMB / totalMB) * 100);
-            
-            document.getElementById('memoryUsage').textContent = `${usedMB}MB / ${totalMB}MB`;
-            
-            // 根据内存使用情况更新引擎状态
-            let engineStatus = '就绪';
-            let engineColor = '#27ae60';
-            
-            if (percent > 90) {
-                engineStatus = '内存告急';
-                engineColor = '#e74c3c';
-            } else if (percent > 70) {
-                engineStatus = '高负载';
-                engineColor = '#e67e22';
-            } else if (this.isProcessing) {
-                engineStatus = '处理中';
-                engineColor = '#3498db';
-            }
-            
-            document.getElementById('engineStatus').textContent = engineStatus;
-            document.getElementById('engineStatus').style.color = engineColor;
-        }
-    }
-    
-    async handleFileUpload(files) {
-        if (!files || files.length === 0) return;
-        
-        this.isProcessing = true;
-        this.showLoader();
-        this.showStatus(`开始流式处理 ${files.length} 个文件...`, 'info');
-        
-        // 获取处理选项
-        const useStreaming = document.getElementById('useStreaming')?.checked ?? true;
-        const useWebWorker = document.getElementById('useWebWorker')?.checked ?? true;
-        const chunkSize = parseInt(document.getElementById('chunkSizeSelect')?.value || 1000);
-        
-        let successCount = 0;
-        let errorFiles = [];
-        
-        try {
-            for (let i = 0; i < files.length; i++) {
-                const file = files[i];
-                const progress = Math.round(((i + 1) / files.length) * 100);
-                
-                this.showProgress(progress);
-                this.showStatus(`流式处理 ${i + 1}/${files.length}: ${file.name}`, 'info');
-                
-                try {
-                    const result = await this.fileProcessor.processFile(file, {
-                        useStreaming,
-                        chunkSize,
-                        onProgress: (progressInfo) => {
-                            this.updateProgressDetails(progressInfo, file.name);
-                        }
-                    });
-                    
-                    if (result.isZip) {
-                        // 处理ZIP文件
-                        for (const fileData of result.files) {
-                            this.storage.addTable(fileData.name, fileData.data, {
-                                isZip: true,
-                                fileType: fileData.fileType,
-                                processedWithStreaming: useStreaming
-                            });
-                            successCount++;
-                        }
-                    } else {
-                        // 处理单个文件
-                        this.storage.addTable(result.name, result.data, {
-                            fileType: file.name.split('.').pop().toLowerCase(),
-                            processedWithStreaming: useStreaming,
-                            chunkSize,
-                            processingTime: result.processingTime
-                        });
-                        successCount++;
-                    }
-                } catch (error) {
-                    console.error('文件处理失败:', file.name, error);
-                    errorFiles.push({ name: file.name, error: error.message });
-                }
-            }
-            
-            if (successCount > 0) {
-                this.showStatus(`流式处理完成！成功导入 ${successCount} 个文件`, 'success');
-            }
-            
-        } catch (error) {
-            console.error('文件处理过程中出现错误:', error);
-            this.showStatus(`处理过程中出现错误: ${error.message}`, 'error');
-        } finally {
-            this.isProcessing = false;
-            this.hideProgress();
-            this.updateUI();
-            this.hideLoader();
-            
-            if (errorFiles.length > 0) {
-                setTimeout(() => {
-                    this.showDetailedErrorReport(errorFiles);
-                }, 500);
-            }
-        }
-    }
-    
-    updateProgressDetails(progressInfo, fileName) {
-        const progressContainer = document.getElementById('progressContainer');
-        const progressText = document.getElementById('progressText');
-        const chunkInfo = document.getElementById('chunkInfo');
-        
-        if (progressContainer && progressText && chunkInfo) {
-            progressContainer.style.display = 'block';
-            
-            if (progressInfo.chunk) {
-                progressText.textContent = `处理 ${fileName} (${progressInfo.progress}%)`;
-                chunkInfo.textContent = `块 ${progressInfo.chunk}/${progressInfo.totalChunks} - ${progressInfo.rowsProcessed}行`;
-            } else {
-                progressText.textContent = `处理 ${fileName} (${progressInfo.progress}%)`;
-                chunkInfo.textContent = `${progressInfo.rowsProcessed}行`;
-            }
-            
-            const progressBar = document.getElementById('progressBar');
-            if (progressBar) {
-                progressBar.style.width = `${progressInfo.progress}%`;
-            }
-        }
-    }
-    
-    // 字段定义相关方法（优化版）
-    async prepareFieldMapping() {
-        if (!this.currentFilteredData || this.currentFilteredData.length === 0) {
-            this.showStatus('没有数据可以进行字段映射', 'error');
-            return;
-        }
-        
-        this.showLoader();
-        this.showStatus('正在提取唯一字段组合...', 'info');
-        
-        try {
-            // 使用Web Worker在后台处理
-            const uniqueCombinations = await this.extractUniqueCombinationsInWorker();
-            
-            this.allFieldCombinations = uniqueCombinations;
-            this.filteredFieldCombinations = [...uniqueCombinations];
-            
-            // 显示字段定义模态框
-            this.showFieldDefinitionModal();
-            
-        } catch (error) {
-            console.error('准备字段映射失败:', error);
-            this.showStatus(`准备字段映射失败: ${error.message}`, 'error');
-        } finally {
-            this.hideLoader();
-        }
-    }
-    
-    async extractUniqueCombinationsInWorker() {
-        return new Promise((resolve) => {
-            // 简化处理：直接在主线程计算
-            const uniqueCombinations = new Map();
-            
-            this.currentFilteredData.forEach((row, index) => {
-                const transactionDesc = row['Transaction Description'] || 
-                                       row['Transaction_Description'] || 
-                                       row['transaction_description'] || '';
-                const amountType = row['Amount Type'] || 
-                                  row['Amount_Type'] || 
-                                  row['amount_type'] || 
-                                  row['Type'] || '';
-                
-                if (transactionDesc && transactionDesc.trim() !== '') {
-                    const key = `${transactionDesc}|${amountType}`;
-                    
-                    if (!uniqueCombinations.has(key)) {
-                        const amount = parseFloat(row['Amount'] || row['amount'] || 0) || 0;
-                        
-                        uniqueCombinations.set(key, {
-                            key,
-                            transactionDesc,
-                            amountType,
-                            count: 1,
-                            totalAmount: amount,
-                            rows: [index]
-                        });
-                    } else {
-                        const existing = uniqueCombinations.get(key);
-                        existing.count++;
-                        existing.totalAmount += parseFloat(row['Amount'] || row['amount'] || 0) || 0;
-                        existing.rows.push(index);
-                    }
-                }
-            });
-            
-            resolve(Array.from(uniqueCombinations.values()));
         });
+
+        // 文件上传事件
+        const fileInput = document.getElementById('fileInput');
+        if (fileInput) {
+            fileInput.addEventListener('change', this.handleFileSelect.bind(this));
+        }
+
+        // 拖放事件
+        this.initFileDrop();
+
+        // 处理面板事件
+        this.bindProcessPanelEvents();
     }
-    
-    showFieldDefinitionModal() {
-        const modal = document.getElementById('fieldDefinitionModal');
-        const countElement = document.getElementById('fieldMappingCount');
+
+    // 显示面板
+    showPanel(panelId) {
+        // 更新导航
+        document.querySelectorAll('.nav-item').forEach(item => {
+            item.classList.remove('active');
+        });
         
-        if (!modal || !countElement) return;
+        const navItem = document.querySelector(`.nav-item[onclick*="'${panelId}'"]`);
+        if (navItem) {
+            navItem.classList.add('active');
+        }
+
+        // 显示对应面板
+        document.querySelectorAll('.content-panel').forEach(panel => {
+            panel.classList.remove('active');
+        });
         
-        countElement.textContent = this.allFieldCombinations.length;
-        
-        // 显示一级分类
-        this.renderPrimaryCategories();
-        
-        // 初始化虚拟滚动
-        this.initVirtualScroll();
-        
-        // 更新分页信息
-        this.updatePaginationInfo();
-        
-        modal.classList.add('active');
+        const targetPanel = document.getElementById(panelId + 'Panel');
+        if (targetPanel) {
+            targetPanel.classList.add('active');
+            this.currentPanel = panelId;
+            
+            // 更新面板内容
+            this.updatePanel(panelId);
+        }
     }
-    
-    initVirtualScroll() {
-        const container = document.getElementById('fieldMappingScrollContainer');
+
+    // 更新面板
+    updatePanel(panelId) {
+        switch (panelId) {
+            case 'tables':
+                this.updateTablesPanel();
+                break;
+            case 'process':
+                this.updateProcessPanel();
+                break;
+            case 'merge':
+                this.updateMergePanel();
+                break;
+        }
+    }
+
+    // 更新所有面板
+    updateAllPanels() {
+        this.updateTablesPanel();
+        this.updateProcessPanel();
+        this.updateMergePanel();
+    }
+
+    // 更新表格管理面板
+    updateTablesPanel() {
+        const container = document.getElementById('tableListContainer');
         if (!container) return;
         
-        // 清空容器
-        container.innerHTML = '';
+        const tables = dataStorage.getAllTables();
         
-        // 创建虚拟滚动实例
-        this.virtualScroll = new VirtualScroll(container, {
-            rowHeight: 45,
-            bufferRows: 10,
-            totalRows: this.filteredFieldCombinations.length,
-            data: this.filteredFieldCombinations,
-            renderRow: this.renderFieldMappingRow.bind(this)
-        });
-    }
-    
-    renderFieldMappingRow(field, index) {
-        const actualIndex = (this.fieldMappingCurrentPage - 1) * this.fieldMappingPageSize + index;
-        const savedMapping = this.storage.autoMatchField(field.transactionDesc, field.amountType);
-        const guessedCategory = this.dataProcessor.guessPrimaryCategory(field.transactionDesc, field.amountType);
-        
-        return `
-            <div style="display: flex; align-items: center; height: 100%; padding: 0 10px; border-bottom: 1px solid #eee;">
-                <div style="width: 50px; text-align: center; color: #666;">${actualIndex + 1}</div>
-                <div style="width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 10px;">
-                    ${field.transactionDesc}
-                </div>
-                <div style="width: 150px; color: #7f8c8d; padding-right: 10px;">
-                    ${field.amountType || ''}
-                </div>
-                <div style="width: 150px; padding-right: 10px;">
-                    <select class="primary-category-select" data-index="${actualIndex}" 
-                            style="width: 100%; padding: 5px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem;">
-                        <option value="">请选择</option>
-                        <option value="销售额" ${this.getSelectedAttr('销售额', savedMapping, guessedCategory)}>销售额</option>
-                        <option value="广告费" ${this.getSelectedAttr('广告费', savedMapping, guessedCategory)}>广告费</option>
-                        <option value="平台佣金" ${this.getSelectedAttr('平台佣金', savedMapping, guessedCategory)}>平台佣金</option>
-                        <option value="仓储费用" ${this.getSelectedAttr('仓储费用', savedMapping, guessedCategory)}>仓储费用</option>
-                        <option value="产品成本" ${this.getSelectedAttr('产品成本', savedMapping, guessedCategory)}>产品成本</option>
-                        <option value="退货费用" ${this.getSelectedAttr('退货费用', savedMapping, guessedCategory)}>退货费用</option>
-                        <option value="测评费用" ${this.getSelectedAttr('测评费用', savedMapping, guessedCategory)}>测评费用</option>
-                        <option value="物流费" ${this.getSelectedAttr('物流费', savedMapping, guessedCategory)}>物流费</option>
-                        <option value="__ignore__" ${savedMapping && savedMapping.primaryCategory === '__ignore__' ? 'selected' : ''}>忽略</option>
-                    </select>
-                </div>
-                <div style="width: 200px; padding-right: 10px;">
-                    <input type="text" class="subcategory-name-input" data-index="${actualIndex}"
-                           value="${savedMapping ? savedMapping.subcategoryName : field.transactionDesc}" 
-                           style="width: 100%; padding: 5px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem;">
-                </div>
-                <div style="width: 100px; text-align: center; color: #2c3e50; font-weight: bold;">
-                    ${field.count}
-                </div>
-                <div style="width: 120px; text-align: right; color: #27ae60; font-weight: bold;">
-                    ${this.formatCurrency(field.totalAmount)}
-                </div>
-            </div>
-        `;
-    }
-    
-    getSelectedAttr(category, savedMapping, guessedCategory) {
-        if (savedMapping && savedMapping.primaryCategory === category) {
-            return 'selected';
+        // 更新表格数量
+        const tableCount = document.getElementById('tableCount');
+        if (tableCount) {
+            tableCount.textContent = tables.length;
         }
-        if (!savedMapping && guessedCategory === category) {
-            return 'selected';
-        }
-        return '';
-    }
-    
-    // 其他UI方法...
-    updateUI() {
-        this.updateTableList();
-        this.updateProcessPanel();
-        this.updateSummaryPanelSelectors();
-    }
-    
-    updateTableList() {
-        const container = document.getElementById('tableListContainer');
-        const countElement = document.getElementById('tableCount');
-        
-        if (!container || !countElement) return;
-        
-        const tables = this.storage.getAllTables();
-        countElement.textContent = tables.length;
         
         if (tables.length === 0) {
             container.innerHTML = `
-                <div style="text-align: center; padding: 40px; color: #7f8c8d; grid-column: 1 / -1;">
-                    <i class="fas fa-table" style="font-size: 3rem; margin-bottom: 20px; opacity: 0.3;"></i>
-                    <p>暂无数据表，请上传数据文件</p>
+                <div style="text-align: center; padding: 50px; color: #7f8c8d; grid-column: 1 / -1;">
+                    <i class="fas fa-table" style="font-size: 48px; margin-bottom: 20px;"></i>
+                    <p>暂无数据表，请先上传文件</p>
                 </div>
             `;
             return;
         }
         
-        container.innerHTML = tables.map(table => `
-            <div class="table-card">
-                <div class="table-header">
-                    <div class="table-name">${table.name}</div>
-                    <span style="font-size: 0.8rem; color: ${
-                        table.isZip ? '#9b59b6' : 
-                        table.name.includes('速猫订单') ? '#e74c3c' : 
-                        table.name.includes('已处理') ? '#27ae60' :
-                        table.name.includes('下单时间匹配') ? '#9b59b6' :
-                        table.name.includes('数据汇总') ? '#e67e22' :
-                        table.name.includes('筛选-') ? '#3498db' :
-                        table.name.includes('汇总') ? '#3498db' :
-                        '#7f8c8d'
-                    };">
-                        ${
-                            table.isZip ? 'ZIP' : 
-                            table.name.includes('速猫订单') ? '订单' : 
-                            table.name.includes('已处理') ? '已处理' :
-                            table.name.includes('下单时间匹配') ? '匹配表' :
-                            table.name.includes('数据汇总') ? '汇总表' :
-                            table.name.includes('筛选-') ? '筛选表' :
-                            table.name.includes('汇总') ? '汇总' :
-                            '表格'
-                        }
-                        ${table.processedWithStreaming ? ' ⚡' : ''}
-                    </span>
+        // 生成表格卡片
+        container.innerHTML = '';
+        tables.forEach((table, index) => {
+            const card = document.createElement('div');
+            card.className = 'table-card';
+            card.innerHTML = `
+                <div class="table-card-header">
+                    <h4 title="${table.name}">${this.truncateText(table.name, 30)}</h4>
+                    <span class="table-badge">${table.data.length}行</span>
                 </div>
-                <div style="color: #7f8c8d; margin: 10px 0; font-size: 0.9rem;">
-                    ${table.columns.length} 列 × ${table.rowCount} 行
-                    ${table.fileType ? ` (${table.fileType.toUpperCase()})` : ''}
-                    ${table.isCompressed ? ' 🔒' : ''}
+                <div class="table-card-body">
+                    <p><i class="fas fa-columns"></i> 列数: ${table.columns.length}</p>
+                    <p><i class="fas fa-calendar"></i> 创建时间: ${new Date(table.metadata.created).toLocaleString()}</p>
                 </div>
-                <div style="color: #95a5a6; font-size: 0.85rem; margin-top: 8px;">
-                    ${new Date(table.createdAt).toLocaleDateString()} 创建
-                </div>
-                <div class="table-tools">
-                    <button class="tool-btn" onclick="ui.previewTable('${table.id}')">
+                <div class="table-card-actions">
+                    <button class="action-btn" onclick="uiManager.previewTable('${table.id}')">
                         <i class="fas fa-eye"></i> 预览
                     </button>
-                    <button class="tool-btn" onclick="ui.exportTable('${table.id}')">
+                    <button class="action-btn" onclick="uiManager.exportTable('${table.id}')">
                         <i class="fas fa-download"></i> 导出
                     </button>
-                    <button class="tool-btn" onclick="ui.deleteTable('${table.id}')">
+                    <button class="action-btn delete" onclick="uiManager.deleteTable('${table.id}')">
                         <i class="fas fa-trash"></i> 删除
                     </button>
                 </div>
+            `;
+            container.appendChild(card);
+        });
+    }
+
+    // 更新处理面板
+    updateProcessPanel() {
+        const select = document.getElementById('processTableSelect');
+        if (!select) return;
+        
+        select.innerHTML = '<option value="">请选择要处理的数据表</option>';
+        
+        const tables = dataStorage.getAllTables();
+        tables.forEach(table => {
+            const option = document.createElement('option');
+            option.value = table.id;
+            option.textContent = `${table.name} (${table.data.length}行)`;
+            select.appendChild(option);
+        });
+    }
+
+    // 更新汇总面板
+    updateMergePanel() {
+        const select = document.getElementById('summaryTableSelect');
+        if (!select) return;
+        
+        select.innerHTML = '<option value="">请选择已处理的数据表</option>';
+        
+        const tables = dataStorage.getAllTables();
+        tables.forEach(table => {
+            if (table.metadata.processed) {
+                const option = document.createElement('option');
+                option.value = table.id;
+                option.textContent = `${table.name} (已处理)`;
+                select.appendChild(option);
+            }
+        });
+    }
+
+    // 预览表格
+    previewTable(tableId) {
+        const table = dataStorage.getTable(tableId);
+        if (!table) return;
+        
+        this.showModal('数据预览 - ' + table.name, this.generatePreviewHTML(table));
+    }
+
+    // 生成预览HTML
+    generatePreviewHTML(table) {
+        const maxRows = Math.min(50, table.data.length);
+        let html = `
+            <div style="margin-bottom: 20px; color: #666;">
+                <p><strong>表格信息：</strong> ${table.data.length}行 × ${table.columns.length}列</p>
+                <p><strong>创建时间：</strong> ${new Date(table.metadata.created).toLocaleString()}</p>
             </div>
-        `).join('');
-    }
-    
-    // 其他方法的实现...
-    // 由于代码长度限制，这里只展示核心优化部分
-    // 完整实现需要包含所有UI交互方法
-    
-    // 工具方法
-    showStatus(message, type = 'info', allowHtml = false) {
-        const statusElement = document.getElementById('statusMessage');
-        if (!statusElement) return;
+            <div style="overflow-x: auto;">
+                <table class="data-preview">
+                    <thead>
+                        <tr>
+        `;
         
-        if (allowHtml) {
-            statusElement.innerHTML = message;
-        } else {
-            statusElement.textContent = message;
+        // 表头
+        table.columns.forEach(col => {
+            html += `<th>${col}</th>`;
+        });
+        
+        html += `</tr></thead><tbody>`;
+        
+        // 数据行
+        for (let i = 0; i < maxRows; i++) {
+            const row = table.data[i];
+            html += '<tr>';
+            
+            table.columns.forEach(col => {
+                const value = row[col];
+                html += `<td title="${value}">${this.truncateText(String(value || ''), 50)}</td>`;
+            });
+            
+            html += '</tr>';
         }
         
-        statusElement.className = `status-message ${type}`;
-        statusElement.style.display = 'block';
+        html += `</tbody></table>`;
         
-        setTimeout(() => {
-            statusElement.style.display = 'none';
-        }, 5000);
+        if (table.data.length > maxRows) {
+            html += `<p style="margin-top: 15px; color: #999; text-align: center;">
+                仅显示前${maxRows}行，共${table.data.length}行数据
+            </p>`;
+        }
+        
+        return html;
     }
-    
-    showLoader() {
+
+    // 导出表格
+    exportTable(tableId) {
+        const table = dataStorage.getTable(tableId);
+        if (!table) {
+            this.showStatus('表格不存在', 'error');
+            return;
+        }
+        
+        try {
+            // 创建工作表
+            const ws = XLSX.utils.json_to_sheet(table.data);
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+            
+            // 导出文件
+            const fileName = `${table.name.replace(/[\\/:*?"<>|]/g, '_')}_导出.xlsx`;
+            XLSX.writeFile(wb, fileName);
+            
+            this.showStatus('表格导出成功', 'success');
+        } catch (error) {
+            console.error('导出失败:', error);
+            this.showStatus('导出失败: ' + error.message, 'error');
+        }
+    }
+
+    // 删除表格
+    deleteTable(tableId) {
+        if (confirm('确定要删除这个表格吗？')) {
+            const success = dataStorage.deleteTable(tableId);
+            if (success) {
+                this.showStatus('表格已删除', 'success');
+                this.updateAllPanels();
+            } else {
+                this.showStatus('删除失败', 'error');
+            }
+        }
+    }
+
+    // 清空所有表格
+    clearAllTables() {
+        const tables = dataStorage.getAllTables();
+        if (tables.length === 0) {
+            this.showStatus('没有可清空的表格', 'info');
+            return;
+        }
+        
+        if (confirm(`确定要清空所有 ${tables.length} 个表格吗？此操作不可恢复。`)) {
+            dataStorage.clearAllTables();
+            this.showStatus('所有表格已清空', 'success');
+            this.updateAllPanels();
+        }
+    }
+
+    // 处理文件选择
+    async handleFileSelect(event) {
+        const files = Array.from(event.target.files);
+        if (files.length === 0) return;
+        
+        // 显示文件信息
+        this.showFileInfo(files);
+        
+        // 处理文件
+        this.showLoader('正在上传和处理文件...');
+        
+        try {
+            const results = await fileProcessor.processFiles(files);
+            
+            // 保存到数据存储
+            results.forEach(result => {
+                if (result.success && result.tables) {
+                    result.tables.forEach(table => {
+                        dataStorage.saveTable(
+                            table.name,
+                            table.data,
+                            table.columns,
+                            {
+                                fileName: result.fileName,
+                                sheetName: table.sheetName,
+                                uploadTime: new Date().toISOString()
+                            }
+                        );
+                    });
+                }
+            });
+            
+            // 更新UI
+            this.updateAllPanels();
+            this.hideLoader();
+            this.showStatus(`成功上传 ${files.length} 个文件`, 'success');
+            
+            // 自动切换到表格管理面板
+            this.showPanel('tables');
+            
+        } catch (error) {
+            this.hideLoader();
+            this.showStatus('文件处理失败: ' + error.message, 'error');
+            console.error('文件处理错误:', error);
+        }
+        
+        // 清空文件输入
+        event.target.value = '';
+    }
+
+    // 显示文件信息
+    showFileInfo(files) {
+        const fileInfo = document.getElementById('fileInfo');
+        const fileList = document.getElementById('fileList');
+        
+        if (!fileInfo || !fileList) return;
+        
+        fileList.innerHTML = '';
+        files.forEach(file => {
+            fileList.innerHTML += `
+                <div style="background: white; padding: 10px; margin: 5px 0; border-radius: 6px; display: flex; justify-content: space-between; align-items: center;">
+                    <span><i class="fas fa-file"></i> ${file.name}</span>
+                    <span style="color: #666; font-size: 0.9rem;">
+                        ${(file.size / 1024).toFixed(1)} KB
+                    </span>
+                </div>
+            `;
+        });
+        fileInfo.style.display = 'block';
+    }
+
+    // 初始化文件拖放
+    initFileDrop() {
+        const dropArea = document.getElementById('uploadDropArea');
+        if (!dropArea) return;
+        
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            dropArea.addEventListener(eventName, preventDefaults, false);
+        });
+        
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+        
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropArea.addEventListener(eventName, highlight, false);
+        });
+        
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropArea.addEventListener(eventName, unhighlight, false);
+        });
+        
+        function highlight() {
+            dropArea.style.borderColor = '#2980b9';
+            dropArea.style.background = '#f0f7ff';
+        }
+        
+        function unhighlight() {
+            dropArea.style.borderColor = '#3498db';
+            dropArea.style.background = 'white';
+        }
+        
+        dropArea.addEventListener('drop', (e) => {
+            const dt = e.dataTransfer;
+            const files = Array.from(dt.files);
+            
+            if (files.length > 0) {
+                // 触发文件处理
+                this.handleFileDrop(files);
+            }
+        });
+    }
+
+    // 处理文件拖放
+    async handleFileDrop(files) {
+        // 显示文件信息
+        this.showFileInfo(files);
+        
+        // 处理文件
+        this.showLoader('正在上传和处理文件...');
+        
+        try {
+            const results = await fileProcessor.processFiles(files);
+            
+            // 保存到数据存储
+            results.forEach(result => {
+                if (result.success && result.tables) {
+                    result.tables.forEach(table => {
+                        dataStorage.saveTable(
+                            table.name,
+                            table.data,
+                            table.columns,
+                            {
+                                fileName: result.fileName,
+                                sheetName: table.sheetName,
+                                uploadTime: new Date().toISOString(),
+                                viaDragDrop: true
+                            }
+                        );
+                    });
+                }
+            });
+            
+            // 更新UI
+            this.updateAllPanels();
+            this.hideLoader();
+            this.showStatus(`成功拖放上传 ${files.length} 个文件`, 'success');
+            
+            // 自动切换到表格管理面板
+            this.showPanel('tables');
+            
+        } catch (error) {
+            this.hideLoader();
+            this.showStatus('文件处理失败: ' + error.message, 'error');
+            console.error('文件处理错误:', error);
+        }
+    }
+
+    // 处理面板事件绑定
+    bindProcessPanelEvents() {
+        const processBtn = document.querySelector('button[onclick*="processSelectedTable"]');
+        if (processBtn) {
+            processBtn.onclick = this.processSelectedTable.bind(this);
+        }
+        
+        const summaryBtn = document.querySelector('button[onclick*="generateSummary"]');
+        if (summaryBtn) {
+            summaryBtn.onclick = this.generateSummary.bind(this);
+        }
+    }
+
+    // 处理选中的表格
+    async processSelectedTable() {
+        const select = document.getElementById('processTableSelect');
+        const tableId = select.value;
+        
+        if (!tableId) {
+            this.showStatus('请先选择要处理的表格', 'error');
+            return;
+        }
+        
+        const table = dataStorage.getTable(tableId);
+        if (!table) {
+            this.showStatus('表格不存在', 'error');
+            return;
+        }
+        
+        this.showLoader('正在处理表格...');
+        
+        try {
+            // 模拟处理过程
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            
+            // 标记为已处理
+            dataStorage.addTableMetadata(tableId, 'processed', true);
+            dataStorage.addTableMetadata(tableId, 'processedTime', new Date().toISOString());
+            
+            this.hideLoader();
+            this.showStatus('表格处理完成', 'success');
+            this.updateAllPanels();
+            
+        } catch (error) {
+            this.hideLoader();
+            this.showStatus('处理失败: ' + error.message, 'error');
+        }
+    }
+
+    // 生成汇总报表
+    async generateSummary() {
+        const select = document.getElementById('summaryTableSelect');
+        const tableId = select.value;
+        
+        if (!tableId) {
+            this.showStatus('请先选择要汇总的表格', 'error');
+            return;
+        }
+        
+        const table = dataStorage.getTable(tableId);
+        if (!table) {
+            this.showStatus('表格不存在', 'error');
+            return;
+        }
+        
+        this.showLoader('正在生成汇总报表...');
+        
+        try {
+            // 模拟汇总处理
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            const html = this.generateSummaryHTML(table);
+            this.showModal('汇总报表 - ' + table.name, html);
+            
+            this.hideLoader();
+            this.showStatus('汇总报表生成完成', 'success');
+            
+        } catch (error) {
+            this.hideLoader();
+            this.showStatus('汇总失败: ' + error.message, 'error');
+        }
+    }
+
+    // 生成汇总HTML
+    generateSummaryHTML(table) {
+        const stats = {
+            totalRows: table.data.length,
+            totalColumns: table.columns.length,
+            numericColumns: 0,
+            textColumns: 0,
+            dateColumns: 0
+        };
+        
+        // 分析数据
+        if (table.data.length > 0) {
+            const firstRow = table.data[0];
+            table.columns.forEach(col => {
+                const value = firstRow[col];
+                if (typeof value === 'number') {
+                    stats.numericColumns++;
+                } else if (value instanceof Date || (typeof value === 'string' && !isNaN(Date.parse(value)))) {
+                    stats.dateColumns++;
+                } else {
+                    stats.textColumns++;
+                }
+            });
+        }
+        
+        return `
+            <div style="margin-bottom: 20px;">
+                <h4 style="color: #2c3e50; margin-bottom: 15px;">表格统计信息</h4>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px;">
+                    <div style="background: #f8f9fa; padding: 15px; border-radius: 6px; text-align: center;">
+                        <p style="color: #666; margin: 0; font-size: 0.9rem;">总行数</p>
+                        <p style="font-size: 1.5rem; font-weight: bold; color: #3498db; margin: 5px 0 0 0;">${stats.totalRows}</p>
+                    </div>
+                    <div style="background: #f8f9fa; padding: 15px; border-radius: 6px; text-align: center;">
+                        <p style="color: #666; margin: 0; font-size: 0.9rem;">总列数</p>
+                        <p style="font-size: 1.5rem; font-weight: bold; color: #27ae60; margin: 5px 0 0 0;">${stats.totalColumns}</p>
+                    </div>
+                    <div style="background: #f8f9fa; padding: 15px; border-radius: 6px; text-align: center;">
+                        <p style="color: #666; margin: 0; font-size: 0.9rem;">数字列</p>
+                        <p style="font-size: 1.5rem; font-weight: bold; color: #9b59b6; margin: 5px 0 0 0;">${stats.numericColumns}</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div>
+                <h4 style="color: #2c3e50; margin-bottom: 15px;">数据列信息</h4>
+                <table class="data-preview">
+                    <thead>
+                        <tr>
+                            <th>列名</th>
+                            <th>类型</th>
+                            <th>示例值</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${table.columns.map(col => {
+                            const sample = table.data[0]?.[col] || '';
+                            let type = typeof sample;
+                            if (sample instanceof Date || (typeof sample === 'string' && !isNaN(Date.parse(sample)))) {
+                                type = '日期';
+                            } else if (typeof sample === 'number') {
+                                type = '数字';
+                            } else {
+                                type = '文本';
+                            }
+                            
+                            return `
+                                <tr>
+                                    <td>${col}</td>
+                                    <td>${type}</td>
+                                    <td title="${sample}">${this.truncateText(String(sample), 30)}</td>
+                                </tr>
+                            `;
+                        }).join('')}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    }
+
+    // 显示模态框
+    showModal(title, content) {
+        // 创建模态框HTML
+        const modalHTML = `
+            <div class="modal-overlay" id="dynamicModal" style="display: flex;">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>${title}</h3>
+                        <button onclick="uiManager.closeModal()" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #999;">
+                            <i class="fas fa-times"></i>
+                        </button>
+                    </div>
+                    <div class="modal-body">
+                        ${content}
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        // 移除旧的模态框
+        const oldModal = document.getElementById('dynamicModal');
+        if (oldModal) {
+            oldModal.remove();
+        }
+        
+        // 添加新的模态框
+        document.body.insertAdjacentHTML('beforeend', modalHTML);
+    }
+
+    // 关闭模态框
+    closeModal() {
+        const modal = document.getElementById('dynamicModal');
+        if (modal) {
+            modal.remove();
+        }
+    }
+
+    // 显示加载动画
+    showLoader(message = '正在处理...') {
         const loader = document.getElementById('loader');
+        const messageEl = document.getElementById('loaderMessage');
+        
         if (loader) {
-            loader.classList.add('active');
+            loader.style.display = 'flex';
+        }
+        
+        if (messageEl && message) {
+            messageEl.textContent = message;
         }
     }
-    
+
+    // 隐藏加载动画
     hideLoader() {
         const loader = document.getElementById('loader');
         if (loader) {
-            loader.classList.remove('active');
+            loader.style.display = 'none';
         }
     }
-    
-    showProgress(percent) {
-        const progressContainer = document.getElementById('progressContainer');
-        const progressBar = document.getElementById('progressBar');
+
+    // 显示状态消息
+    showStatus(message, type = 'info', duration = 3000) {
+        const statusEl = document.getElementById('statusMessage');
+        if (!statusEl) return;
         
-        if (progressContainer && progressBar) {
-            progressContainer.style.display = 'block';
-            progressBar.style.width = percent + '%';
-        }
+        statusEl.textContent = message;
+        statusEl.className = 'status-message ' + type;
+        statusEl.style.display = 'block';
+        
+        setTimeout(() => {
+            statusEl.style.display = 'none';
+        }, duration);
     }
-    
-    hideProgress() {
-        const progressContainer = document.getElementById('progressContainer');
-        if (progressContainer) {
-            progressContainer.style.display = 'none';
-        }
+
+    // 截断文本
+    truncateText(text, maxLength) {
+        if (text.length <= maxLength) return text;
+        return text.substring(0, maxLength) + '...';
     }
-    
-    formatCurrency(amount) {
-        if (amount === null || amount === undefined) return '$0.00';
-        
-        const num = parseFloat(amount);
-        if (isNaN(num)) return '$0.00';
-        
-        const isNegative = num < 0;
-        const absNum = Math.abs(num);
-        
-        const formatted = '$' + absNum.toLocaleString('zh-CN', {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2
-        });
-        
-        return isNegative ? '-' + formatted : formatted;
-    }
-    
-    // 获取索引数量（用于性能监控）
-    getIndexCount() {
-        return this.storage.getIndexCount();
-    }
+}
+
+// 创建UI管理器实例
+const uiManager = new UIManager();
+window.uiManager = uiManager;
+
+// 全局函数 - 用于HTML中的onclick事件
+function showPanel(panelId) {
+    uiManager.showPanel(panelId);
 }
